@@ -5,48 +5,78 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
 interface NewsItem {
-  id: number;
+  id: string;
   title: string;
   category: string;
-  encryptedScore: string;
-  publicViews: number;
+  source: string;
   timestamp: number;
   creator: string;
+  publicValue1: number;
+  publicValue2: number;
   isVerified?: boolean;
-  decryptedScore?: number;
+  decryptedValue?: number;
+  encryptedValueHandle?: string;
+  description: string;
+}
+
+interface NewsStats {
+  totalNews: number;
+  verifiedNews: number;
+  avgEngagement: number;
+  trendingCount: number;
+  categories: {[key: string]: number};
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
   const [newsItems, setNewsItems] = useState<NewsItem[]>([]);
+  const [filteredNews, setFilteredNews] = useState<NewsItem[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingNews, setCreatingNews] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
-    status: "pending", 
+    status: "pending" as const, 
     message: "" 
   });
-  const [newNewsData, setNewNewsData] = useState({ title: "", category: "tech", score: "" });
+  const [newNewsData, setNewNewsData] = useState({ 
+    title: "", 
+    category: "科技", 
+    engagement: "", 
+    description: "" 
+  });
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
-  const [decryptedScore, setDecryptedScore] = useState<number | null>(null);
+  const [decryptedData, setDecryptedData] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState("all");
-  const [showStats, setShowStats] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage] = useState(6);
+  const [userHistory, setUserHistory] = useState<string[]>([]);
+  const [showFAQ, setShowFAQ] = useState(false);
+  const [stats, setStats] = useState<NewsStats>({
+    totalNews: 0,
+    verifiedNews: 0,
+    avgEngagement: 0,
+    trendingCount: 0,
+    categories: {}
+  });
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
   const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
 
+  const categories = ["科技", "政治", "经济", "娱乐", "体育", "健康", "教育", "国际"];
+
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -87,6 +117,42 @@ const App: React.FC = () => {
     loadDataAndContract();
   }, [isConnected]);
 
+  useEffect(() => {
+    filterNews();
+  }, [newsItems, searchQuery, currentPage]);
+
+  const filterNews = () => {
+    let filtered = newsItems;
+    
+    if (searchQuery) {
+      filtered = filtered.filter(item => 
+        item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.source.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+    }
+    
+    setFilteredNews(filtered);
+    updateStats(filtered);
+  };
+
+  const updateStats = (items: NewsItem[]) => {
+    const categoriesCount: {[key: string]: number} = {};
+    items.forEach(item => {
+      categoriesCount[item.category] = (categoriesCount[item.category] || 0) + 1;
+    });
+
+    const totalEngagement = items.reduce((sum, item) => sum + item.publicValue1, 0);
+    
+    setStats({
+      totalNews: items.length,
+      verifiedNews: items.filter(item => item.isVerified).length,
+      avgEngagement: items.length > 0 ? totalEngagement / items.length : 0,
+      trendingCount: items.filter(item => item.publicValue1 > 5).length,
+      categories: categoriesCount
+    });
+  };
+
   const loadData = async () => {
     if (!isConnected) return;
     
@@ -102,15 +168,17 @@ const App: React.FC = () => {
         try {
           const businessData = await contract.getBusinessData(businessId);
           newsList.push({
-            id: parseInt(businessId.replace('news-', '')) || Date.now(),
+            id: businessId,
             title: businessData.name,
-            category: getCategoryFromValue(businessData.publicValue1),
-            encryptedScore: businessId,
-            publicViews: Number(businessData.publicValue2) || 0,
+            category: categories[Number(businessData.publicValue2) % categories.length] || "科技",
+            source: "加密新闻源",
             timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             isVerified: businessData.isVerified,
-            decryptedScore: Number(businessData.decryptedValue) || 0
+            decryptedValue: Number(businessData.decryptedValue) || 0,
+            description: businessData.description
           });
         } catch (e) {
           console.error('Error loading business data:', e);
@@ -126,56 +194,52 @@ const App: React.FC = () => {
     }
   };
 
-  const getCategoryFromValue = (value: number): string => {
-    const categories = ["tech", "politics", "sports", "entertainment", "science"];
-    return categories[value % categories.length] || "general";
-  };
-
   const createNews = async () => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "请先连接钱包" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
     setCreatingNews(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating news with FHE encryption..." });
+    setTransactionStatus({ visible: true, status: "pending", message: "使用Zama FHE创建加密新闻..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const scoreValue = parseInt(newNewsData.score) || 0;
+      const engagementValue = parseInt(newNewsData.engagement) || 0;
       const businessId = `news-${Date.now()}`;
-      const categoryValue = ["tech", "politics", "sports", "entertainment", "science"].indexOf(newNewsData.category);
+      const categoryIndex = categories.indexOf(newNewsData.category);
       
-      const encryptedResult = await encrypt(contractAddress, address, scoreValue);
+      const encryptedResult = await encrypt(contractAddress, address, engagementValue);
       
       const tx = await contract.createBusinessData(
         businessId,
         newNewsData.title,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        categoryValue,
-        Math.floor(Math.random() * 1000),
-        "Encrypted News Item"
+        engagementValue,
+        categoryIndex,
+        newNewsData.description
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "等待交易确认..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "News created successfully!" });
+      setUserHistory(prev => [...prev, `创建新闻: ${newNewsData.title}`]);
+      setTransactionStatus({ visible: true, status: "success", message: "新闻创建成功!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
       setShowCreateModal(false);
-      setNewNewsData({ title: "", category: "tech", score: "" });
+      setNewNewsData({ title: "", category: "科技", engagement: "", description: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
-        : "Submission failed: " + (e.message || "Unknown error");
+        ? "用户取消交易" 
+        : "提交失败: " + (e.message || "未知错误");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
@@ -183,9 +247,9 @@ const App: React.FC = () => {
     }
   };
 
-  const decryptScore = async (businessId: string): Promise<number | null> => {
+  const decryptData = async (businessId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "请先连接钱包" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
@@ -198,7 +262,7 @@ const App: React.FC = () => {
       const businessData = await contractRead.getBusinessData(businessId);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data already verified on-chain" });
+        setTransactionStatus({ visible: true, status: "success", message: "数据已在链上验证" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         return storedValue;
       }
@@ -215,26 +279,25 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
-      
+      setTransactionStatus({ visible: true, status: "pending", message: "链上验证解密中..." });
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Score decrypted and verified!" });
+      setUserHistory(prev => [...prev, `解密新闻: ${businessData.name}`]);
+      setTransactionStatus({ visible: true, status: "success", message: "数据解密验证成功!" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       
       return Number(clearValue);
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified" });
+        setTransactionStatus({ visible: true, status: "success", message: "数据已在链上验证" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed: " + (e.message || "Unknown error") });
+      setTransactionStatus({ visible: true, status: "error", message: "解密失败: " + (e.message || "未知错误") });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -248,28 +311,164 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const available = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available and ready!" });
+      setTransactionStatus({ visible: true, status: "success", message: "合约可用性检查成功!" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
+      setTransactionStatus({ visible: true, status: "error", message: "可用性检查失败" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredNews = newsItems.filter(item => {
-    const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = selectedCategory === "all" || item.category === selectedCategory;
-    return matchesSearch && matchesCategory;
-  });
+  const renderStats = () => {
+    return (
+      <div className="stats-grid">
+        <div className="stat-card neon-purple">
+          <h3>总新闻数</h3>
+          <div className="stat-value">{stats.totalNews}</div>
+          <div className="stat-trend">+{stats.trendingCount} 热门</div>
+        </div>
+        
+        <div className="stat-card neon-blue">
+          <h3>已验证数据</h3>
+          <div className="stat-value">{stats.verifiedNews}/{stats.totalNews}</div>
+          <div className="stat-trend">FHE保护</div>
+        </div>
+        
+        <div className="stat-card neon-pink">
+          <h3>平均参与度</h3>
+          <div className="stat-value">{stats.avgEngagement.toFixed(1)}/10</div>
+          <div className="stat-trend">加密统计</div>
+        </div>
+        
+        <div className="stat-card neon-green">
+          <h3>分类分布</h3>
+          <div className="stat-value">{Object.keys(stats.categories).length}</div>
+          <div className="stat-trend">个分类</div>
+        </div>
+      </div>
+    );
+  };
 
-  const categories = ["all", "tech", "politics", "sports", "entertainment", "science"];
+  const renderNewsGrid = () => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const currentItems = filteredNews.slice(startIndex, startIndex + itemsPerPage);
+    const totalPages = Math.ceil(filteredNews.length / itemsPerPage);
+
+    return (
+      <div className="news-grid-container">
+        <div className="news-grid">
+          {currentItems.map((news, index) => (
+            <div 
+              className={`news-card ${news.isVerified ? "verified" : ""}`}
+              key={news.id}
+              onClick={() => setSelectedNews(news)}
+            >
+              <div className="news-category">{news.category}</div>
+              <div className="news-title">{news.title}</div>
+              <div className="news-meta">
+                <span>来源: {news.source}</span>
+                <span>时间: {new Date(news.timestamp * 1000).toLocaleDateString()}</span>
+              </div>
+              <div className="news-stats">
+                <div className="engagement-score">
+                  参与度: {news.publicValue1}/10
+                </div>
+                <div className={`verification-status ${news.isVerified ? "verified" : "pending"}`}>
+                  {news.isVerified ? "✅ 已验证" : "🔒 待验证"}
+                </div>
+              </div>
+              {news.isVerified && news.decryptedValue && (
+                <div className="decrypted-value">
+                  加密评分: {news.decryptedValue}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        
+        {totalPages > 1 && (
+          <div className="pagination">
+            <button 
+              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+              disabled={currentPage === 1}
+              className="page-btn"
+            >
+              上一页
+            </button>
+            
+            {Array.from({length: Math.min(5, totalPages)}, (_, i) => {
+              const page = currentPage <= 3 ? i + 1 : 
+                         currentPage >= totalPages - 2 ? totalPages - 4 + i : 
+                         currentPage - 2 + i;
+              return page > 0 && page <= totalPages ? (
+                <button
+                  key={page}
+                  onClick={() => setCurrentPage(page)}
+                  className={`page-btn ${currentPage === page ? "active" : ""}`}
+                >
+                  {page}
+                </button>
+              ) : null;
+            })}
+            
+            <button 
+              onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+              disabled={currentPage === totalPages}
+              className="page-btn"
+            >
+              下一页
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderUserHistory = () => {
+    return (
+      <div className="history-panel">
+        <h3>用户操作记录</h3>
+        <div className="history-list">
+          {userHistory.slice(-5).map((record, index) => (
+            <div key={index} className="history-item">
+              {record}
+            </div>
+          ))}
+          {userHistory.length === 0 && <div className="no-history">暂无操作记录</div>}
+        </div>
+      </div>
+    );
+  };
+
+  const renderFAQ = () => {
+    return (
+      <div className="faq-modal">
+        <div className="faq-content">
+          <h2>常见问题解答</h2>
+          <div className="faq-item">
+            <h4>什么是FHE加密新闻？</h4>
+            <p>全同态加密技术保护新闻参与度数据，实现隐私保护的个性化推荐。</p>
+          </div>
+          <div className="faq-item">
+            <h4>如何验证加密数据？</h4>
+            <p>点击"验证解密"按钮，系统会进行离线解密和链上验证。</p>
+          </div>
+          <div className="faq-item">
+            <h4>数据是否安全？</h4>
+            <p>所有敏感数据都经过Zama FHE加密，只有用户可解密查看。</p>
+          </div>
+          <button onClick={() => setShowFAQ(false)} className="close-faq">关闭</button>
+        </div>
+      </div>
+    );
+  };
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>Confidential News Feed 🔐</h1>
+            <h1>🔐 隐私新闻流</h1>
           </div>
           <div className="header-actions">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -279,8 +478,8 @@ const App: React.FC = () => {
         <div className="connection-prompt">
           <div className="connection-content">
             <div className="connection-icon">🔐</div>
-            <h2>Connect Your Wallet</h2>
-            <p>Please connect your wallet to access the encrypted news feed with FHE protection.</p>
+            <h2>连接钱包开始使用</h2>
+            <p>连接您的钱包来初始化加密新闻系统，体验隐私保护的新闻阅读。</p>
           </div>
         </div>
       </div>
@@ -291,7 +490,7 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE Encryption System...</p>
+        <p>初始化FHE加密系统...</p>
       </div>
     );
   }
@@ -299,7 +498,7 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading encrypted news feed...</p>
+      <p>加载加密新闻系统...</p>
     </div>
   );
 
@@ -307,225 +506,98 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>Confidential News Feed 🔐</h1>
-          <p>Privacy-preserving news aggregation with FHE</p>
+          <h1>🔐 隐私新闻流</h1>
+          <p>FHE保护的个性化新闻推荐</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={checkAvailability} className="availability-btn">Check Availability</button>
-          <button onClick={() => setShowStats(!showStats)} className="stats-btn">
-            {showStats ? "Hide Stats" : "Show Stats"}
-          </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">+ Add News</button>
+          <div className="action-group">
+            <button onClick={checkAvailability} className="action-btn neon-blue">
+              检查可用性
+            </button>
+            <button onClick={() => setShowCreateModal(true)} className="action-btn neon-pink">
+              发布新闻
+            </button>
+            <button onClick={() => setShowFAQ(true)} className="action-btn neon-green">
+              常见问题
+            </button>
+          </div>
           <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
         </div>
       </header>
       
       <div className="main-content">
-        <div className="controls-section">
+        <div className="search-section">
           <div className="search-bar">
-            <input 
-              type="text" 
-              placeholder="Search news..." 
+            <input
+              type="text"
+              placeholder="搜索新闻标题、分类或来源..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              className="search-input"
             />
+            <button className="search-btn">搜索</button>
           </div>
-          
-          <div className="category-filters">
-            {categories.map(cat => (
-              <button 
-                key={cat}
-                className={`category-btn ${selectedCategory === cat ? 'active' : ''}`}
-                onClick={() => setSelectedCategory(cat)}
-              >
-                {cat}
-              </button>
-            ))}
+          <div className="search-stats">
+            找到 {filteredNews.length} 条新闻
+            {searchQuery && <span>，关键词: "{searchQuery}"</span>}
           </div>
-          
-          <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
         </div>
-
-        {showStats && (
-          <div className="stats-panel">
-            <div className="stat-item">
-              <span>Total News</span>
-              <strong>{newsItems.length}</strong>
-            </div>
-            <div className="stat-item">
-              <span>Verified</span>
-              <strong>{newsItems.filter(item => item.isVerified).length}</strong>
-            </div>
-            <div className="stat-item">
-              <span>Categories</span>
-              <strong>{new Set(newsItems.map(item => item.category)).size}</strong>
-            </div>
-          </div>
-        )}
-
-        <div className="news-grid">
-          {filteredNews.length === 0 ? (
-            <div className="no-news">
-              <p>No news items found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Add First News Item
+        
+        {renderStats()}
+        
+        <div className="content-grid">
+          <div className="news-section">
+            <div className="section-header">
+              <h2>加密新闻流</h2>
+              <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
+                {isRefreshing ? "刷新中..." : "刷新"}
               </button>
             </div>
-          ) : (
-            filteredNews.map((item, index) => (
-              <div 
-                className={`news-card ${item.isVerified ? 'verified' : ''}`}
-                key={index}
-                onClick={() => setSelectedNews(item)}
-              >
-                <div className="news-header">
-                  <span className="category-badge">{item.category}</span>
-                  {item.isVerified && <span className="verified-badge">✅ Verified</span>}
-                </div>
-                <h3 className="news-title">{item.title}</h3>
-                <div className="news-meta">
-                  <span>Views: {item.publicViews}</span>
-                  <span>{new Date(item.timestamp * 1000).toLocaleDateString()}</span>
-                </div>
-                <div className="news-score">
-                  Score: {item.isVerified ? item.decryptedScore : "🔒 Encrypted"}
-                </div>
+            {renderNewsGrid()}
+          </div>
+          
+          <div className="sidebar">
+            {renderUserHistory()}
+            <div className="info-panel">
+              <h3>FHE加密流程</h3>
+              <div className="fhe-flow">
+                <div className="flow-step">1. 数据加密</div>
+                <div className="flow-step">2. 链上存储</div>
+                <div className="flow-step">3. 离线解密</div>
+                <div className="flow-step">4. 链上验证</div>
               </div>
-            ))
-          )}
+            </div>
+          </div>
         </div>
       </div>
       
       {showCreateModal && (
-        <div className="modal-overlay">
-          <div className="create-news-modal">
-            <div className="modal-header">
-              <h2>Add Encrypted News</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-modal">&times;</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="form-group">
-                <label>News Title *</label>
-                <input 
-                  type="text" 
-                  value={newNewsData.title}
-                  onChange={(e) => setNewNewsData({...newNewsData, title: e.target.value})}
-                  placeholder="Enter news title..."
-                />
-              </div>
-              
-              <div className="form-group">
-                <label>Category *</label>
-                <select 
-                  value={newNewsData.category}
-                  onChange={(e) => setNewNewsData({...newNewsData, category: e.target.value})}
-                >
-                  <option value="tech">Technology</option>
-                  <option value="politics">Politics</option>
-                  <option value="sports">Sports</option>
-                  <option value="entertainment">Entertainment</option>
-                  <option value="science">Science</option>
-                </select>
-              </div>
-              
-              <div className="form-group">
-                <label>Quality Score (Integer) *</label>
-                <input 
-                  type="number" 
-                  value={newNewsData.score}
-                  onChange={(e) => setNewNewsData({...newNewsData, score: e.target.value})}
-                  placeholder="Enter quality score..."
-                  min="0"
-                />
-                <div className="help-text">This value will be FHE encrypted</div>
-              </div>
-            </div>
-            
-            <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
-              <button 
-                onClick={createNews}
-                disabled={creatingNews || isEncrypting || !newNewsData.title || !newNewsData.score}
-                className="submit-btn"
-              >
-                {creatingNews || isEncrypting ? "Encrypting..." : "Add News"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <CreateNewsModal 
+          onSubmit={createNews} 
+          onClose={() => setShowCreateModal(false)} 
+          creating={creatingNews} 
+          newsData={newNewsData} 
+          setNewsData={setNewNewsData}
+          isEncrypting={isEncrypting}
+          categories={categories}
+        />
       )}
       
       {selectedNews && (
-        <div className="modal-overlay">
-          <div className="news-detail-modal">
-            <div className="modal-header">
-              <h2>News Details</h2>
-              <button onClick={() => {
-                setSelectedNews(null);
-                setDecryptedScore(null);
-              }} className="close-modal">&times;</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="news-info">
-                <h3>{selectedNews.title}</h3>
-                <div className="info-grid">
-                  <div className="info-item">
-                    <span>Category:</span>
-                    <strong>{selectedNews.category}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Views:</span>
-                    <strong>{selectedNews.publicViews}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Created:</span>
-                    <strong>{new Date(selectedNews.timestamp * 1000).toLocaleDateString()}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Creator:</span>
-                    <strong>{selectedNews.creator.substring(0, 8)}...{selectedNews.creator.substring(36)}</strong>
-                  </div>
-                </div>
-                
-                <div className="score-section">
-                  <h4>Quality Score</h4>
-                  <div className="score-display">
-                    {selectedNews.isVerified ? (
-                      <span className="decrypted-score">{selectedNews.decryptedScore} (Verified)</span>
-                    ) : decryptedScore !== null ? (
-                      <span className="decrypted-score">{decryptedScore} (Local)</span>
-                    ) : (
-                      <span className="encrypted-score">🔒 FHE Encrypted</span>
-                    )}
-                  </div>
-                  
-                  <button 
-                    onClick={async () => {
-                      if (decryptedScore !== null) {
-                        setDecryptedScore(null);
-                      } else {
-                        const score = await decryptScore(selectedNews.encryptedScore);
-                        if (score !== null) setDecryptedScore(score);
-                      }
-                    }}
-                    disabled={isDecrypting || fheIsDecrypting}
-                    className={`decrypt-btn ${(selectedNews.isVerified || decryptedScore !== null) ? 'decrypted' : ''}`}
-                  >
-                    {isDecrypting || fheIsDecrypting ? "Decrypting..." : 
-                     selectedNews.isVerified ? "✅ Verified" : 
-                     decryptedScore !== null ? "🔄 Re-decrypt" : "🔓 Decrypt Score"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <NewsDetailModal 
+          news={selectedNews} 
+          onClose={() => { 
+            setSelectedNews(null); 
+            setDecryptedData(null); 
+          }} 
+          decryptedData={decryptedData} 
+          isDecrypting={isDecrypting || fheIsDecrypting} 
+          decryptData={() => decryptData(selectedNews.id)}
+        />
       )}
+      
+      {showFAQ && renderFAQ()}
       
       {transactionStatus.visible && (
         <div className="transaction-modal">
@@ -539,6 +611,188 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+    </div>
+  );
+};
+
+const CreateNewsModal: React.FC<{
+  onSubmit: () => void; 
+  onClose: () => void; 
+  creating: boolean;
+  newsData: any;
+  setNewsData: (data: any) => void;
+  isEncrypting: boolean;
+  categories: string[];
+}> = ({ onSubmit, onClose, creating, newsData, setNewsData, isEncrypting, categories }) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    if (name === 'engagement') {
+      const intValue = value.replace(/[^\d]/g, '');
+      setNewsData({ ...newsData, [name]: intValue });
+    } else {
+      setNewsData({ ...newsData, [name]: value });
+    }
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="create-news-modal">
+        <div className="modal-header">
+          <h2>发布加密新闻</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="fhe-notice">
+            <strong>FHE 🔐 加密保护</strong>
+            <p>新闻参与度数据将使用Zama FHE加密（仅支持整数）</p>
+          </div>
+          
+          <div className="form-group">
+            <label>新闻标题 *</label>
+            <input 
+              type="text" 
+              name="title" 
+              value={newsData.title} 
+              onChange={handleChange} 
+              placeholder="输入新闻标题..." 
+            />
+          </div>
+          
+          <div className="form-group">
+            <label>新闻分类 *</label>
+            <select name="category" value={newsData.category} onChange={handleChange}>
+              {categories.map(cat => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="form-group">
+            <label>参与度评分 (1-10) *</label>
+            <input 
+              type="number" 
+              min="1" 
+              max="10" 
+              name="engagement" 
+              value={newsData.engagement} 
+              onChange={handleChange} 
+              placeholder="输入参与度评分..." 
+            />
+            <div className="data-type-label">FHE加密整数</div>
+          </div>
+          
+          <div className="form-group">
+            <label>新闻描述</label>
+            <textarea 
+              name="description" 
+              value={newsData.description} 
+              onChange={handleChange} 
+              placeholder="输入新闻描述..." 
+              rows={3}
+            />
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="cancel-btn">取消</button>
+          <button 
+            onClick={onSubmit} 
+            disabled={creating || isEncrypting || !newsData.title || !newsData.engagement} 
+            className="submit-btn"
+          >
+            {creating || isEncrypting ? "加密并发布中..." : "发布新闻"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const NewsDetailModal: React.FC<{
+  news: NewsItem;
+  onClose: () => void;
+  decryptedData: number | null;
+  isDecrypting: boolean;
+  decryptData: () => Promise<number | null>;
+}> = ({ news, onClose, decryptedData, isDecrypting, decryptData }) => {
+  const handleDecrypt = async () => {
+    if (decryptedData !== null) return;
+    await decryptData();
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="news-detail-modal">
+        <div className="modal-header">
+          <h2>新闻详情</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="news-info">
+            <div className="info-row">
+              <span>标题:</span>
+              <strong>{news.title}</strong>
+            </div>
+            <div className="info-row">
+              <span>分类:</span>
+              <strong>{news.category}</strong>
+            </div>
+            <div className="info-row">
+              <span>来源:</span>
+              <strong>{news.source}</strong>
+            </div>
+            <div className="info-row">
+              <span>发布时间:</span>
+              <strong>{new Date(news.timestamp * 1000).toLocaleString()}</strong>
+            </div>
+            <div className="info-row">
+              <span>创建者:</span>
+              <strong>{news.creator.substring(0, 6)}...{news.creator.substring(38)}</strong>
+            </div>
+          </div>
+          
+          <div className="data-section">
+            <h3>加密数据</h3>
+            <div className="data-row">
+              <div className="data-label">参与度评分:</div>
+              <div className="data-value">
+                {news.isVerified && news.decryptedValue ? 
+                  `${news.decryptedValue} (链上已验证)` : 
+                  decryptedData !== null ? 
+                  `${decryptedData} (本地已解密)` : 
+                  "🔒 FHE加密整数"
+                }
+              </div>
+              <button 
+                className={`decrypt-btn ${(news.isVerified || decryptedData !== null) ? 'decrypted' : ''}`}
+                onClick={handleDecrypt} 
+                disabled={isDecrypting}
+              >
+                {isDecrypting ? "🔓 验证中..." : 
+                 news.isVerified ? "✅ 已验证" : 
+                 decryptedData !== null ? "🔄 重新验证" : 
+                 "🔓 验证解密"}
+              </button>
+            </div>
+          </div>
+          
+          <div className="description-section">
+            <h3>新闻内容</h3>
+            <p>{news.description || "暂无详细描述"}</p>
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="close-btn">关闭</button>
+          {!news.isVerified && (
+            <button onClick={handleDecrypt} disabled={isDecrypting} className="verify-btn">
+              {isDecrypting ? "验证中..." : "链上验证"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
